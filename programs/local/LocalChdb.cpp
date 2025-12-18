@@ -10,6 +10,8 @@
 #include <pybind11/pybind11.h>
 #include <Poco/String.h>
 #include <Common/logger_useful.h>
+#include <algorithm>
+#include <cctype>
 #include <vector>
 #include <sstream>
 #if USE_JEMALLOC
@@ -107,12 +109,41 @@ extern void cachePythonTablesFromQuery(chdb_conn * conn, const std::string & que
 const static char * CURSOR_DEFAULT_FORMAT = "JSONCompactEachRowWithNamesAndTypes";
 const static size_t CURSOR_DEFAULT_FORMAT_LEN = strlen(CURSOR_DEFAULT_FORMAT);
 
+namespace
+{
+std::string normalize_progress_mode(std::string mode)
+{
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return mode;
+}
+
+void append_progress_flags(std::vector<std::string> & argv, const std::string & progress_mode)
+{
+    auto progress_lower = normalize_progress_mode(progress_mode);
+    if (progress_lower.empty() || progress_lower == "none")
+        return;
+
+    if (progress_lower == "bar" || progress_lower == "true")
+    {
+        argv.push_back("--progress=tty");
+        argv.push_back("--progress-table=off");
+    }
+    else if (progress_lower == "table")
+    {
+        argv.push_back("--progress=off");
+        argv.push_back("--progress-table=tty");
+        argv.push_back("--enable-progress-table-toggle=0");
+    }
+}
+}
+
 chdb_result * queryToBuffer(
     const std::string & queryStr,
     const std::string & output_format = "CSV",
     const std::string & path = {},
     const std::string & udfPath = {},
-    const DB::NameToNameMap & params = {})
+    const DB::NameToNameMap & params = {},
+    const std::string & progress_mode = {})
 {
     std::vector<std::string> argv = {"clickhouse", "--multiquery"};
 
@@ -154,6 +185,8 @@ chdb_result * queryToBuffer(
         argv.push_back("--param_" + key + "=" + value);
     }
 
+    append_progress_flags(argv, progress_mode);
+
     // Convert std::string to char*
     std::vector<char *> argv_char;
     argv_char.reserve(argv.size());
@@ -171,9 +204,10 @@ query_result * query(
     const std::string & output_format = "CSV",
     const std::string & path = {},
     const std::string & udfPath = {},
-    const py::dict & params = py::dict())
+    const py::dict & params = py::dict(),
+    const std::string & progress_mode = {})
 {
-    return new query_result(queryToBuffer(queryStr, output_format, path, udfPath, parseParametersDict(params)));
+    return new query_result(queryToBuffer(queryStr, output_format, path, udfPath, parseParametersDict(params), progress_mode));
 }
 
 // The `query_result` and `memoryview_wrapper` will hold `local_result_wrapper` with shared_ptr
@@ -269,7 +303,10 @@ std::pair<std::string, std::map<std::string, std::string>> connection_wrapper::p
 }
 
 std::vector<std::string>
-connection_wrapper::build_clickhouse_args(const std::string & path, const std::map<std::string, std::string> & params)
+connection_wrapper::build_clickhouse_args(
+    const std::string & path,
+    const std::map<std::string, std::string> & params,
+    const std::string & progress_mode)
 {
     std::vector<std::string> argv = {"clickhouse"};
 
@@ -305,14 +342,16 @@ connection_wrapper::build_clickhouse_args(const std::string & path, const std::m
         }
     }
 
+    append_progress_flags(argv, progress_mode);
+
     return argv;
 }
 
-connection_wrapper::connection_wrapper(const std::string & conn_str)
+connection_wrapper::connection_wrapper(const std::string & conn_str, const std::string & progress_mode)
 {
     auto [path, params] = parse_connection_string(conn_str);
 
-    auto argv = build_clickhouse_args(path, params);
+    auto argv = build_clickhouse_args(path, params, progress_mode);
     std::vector<char *> argv_char;
     argv_char.reserve(argv.size());
     for (auto & arg : argv)
@@ -632,7 +671,11 @@ PYBIND11_MODULE(_chdb, m)
         .def("error_message", &cursor_wrapper::error_message);
 
     py::class_<connection_wrapper>(m, "connect")
-        .def(py::init([](const std::string & path) { return new connection_wrapper(path); }), py::arg("path") = ":memory:")
+        .def(py::init([](const std::string & path, const std::string & progress_mode)
+            { return new connection_wrapper(path, progress_mode); }),
+            py::arg("path") = ":memory:",
+            py::kw_only(),
+            py::arg("progress") = "none")
         .def("cursor", &connection_wrapper::cursor)
         .def("execute", &connection_wrapper::query)
         .def("commit", &connection_wrapper::commit)
@@ -685,6 +728,7 @@ PYBIND11_MODULE(_chdb, m)
         py::arg("path") = "",
         py::arg("udf_path") = "",
         py::arg("params") = py::dict(),
+        py::arg("progress") = "none",
         "Query chDB and return a query_result object or DataFrame");
 
     auto destroy_import_cache = []()

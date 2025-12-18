@@ -41,6 +41,14 @@ public:
 
     bool hasStreamingQuery() const;
 
+    /// Apply progress-related options and initialize TTY buffer.
+    void applyProgressOptions(
+        ProgressOption progress_opt,
+        ProgressOption progress_table_opt,
+        const std::string & progress_value,
+        const std::string & progress_table_value,
+        std::optional<bool> progress_table_toggle);
+
     size_t getStorageRowsRead() const;
     size_t getStorageBytesRead() const;
 

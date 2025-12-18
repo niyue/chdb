@@ -7,11 +7,13 @@
 #include <cstring>
 #include <ChdbClient.h>
 #include <EmbeddedServer.h>
+#include <Client/ClientBase.h>
 #if USE_PYTHON
 #    include <PythonTableCache.h>
 #endif
 #include <Common/MemoryTracker.h>
 #include <Common/ThreadStatus.h>
+#include <Poco/String.h>
 
 #if defined(USE_MUSL) && defined(__aarch64__)
 void chdb_musl_compile_stub(int arg)
@@ -152,17 +154,110 @@ const std::string & chdb_streaming_result_error_string(chdb_streaming_result * r
     return stream_query_result->getError();
 }
 
+namespace
+{
+const std::vector<std::string_view> kClientOnlyPrefixes = {
+    "--progress=",
+    "--progress-table=",
+    "--enable-progress-table-toggle=",
+};
+
+bool isClientOnlyArg(const std::string & arg)
+{
+    for (const auto & prefix : kClientOnlyPrefixes)
+    {
+        if (arg.rfind(prefix, 0) == 0)
+            return true;
+    }
+    return false;
+}
+
+std::vector<char *> filterServerArgs(int argc, char ** argv)
+{
+
+    std::vector<std::string> filtered_args;
+    filtered_args.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i)
+    {
+        std::string arg = argv[i] ? argv[i] : "";
+        if (isClientOnlyArg(arg))
+            continue;
+        filtered_args.emplace_back(arg);
+    }
+
+    std::vector<char *> filtered_argv;
+    filtered_argv.reserve(filtered_args.size());
+    for (auto & s : filtered_args)
+        filtered_argv.push_back(const_cast<char *>(s.c_str()));
+    return filtered_argv;
+}
+
+void applyProgressArgsIfPresent(DB::ChdbClient & client, int argc, char ** argv)
+{
+    try
+    {
+        bool has_progress_arg = false;
+        for (int i = 0; i < argc; ++i)
+        {
+            std::string arg = argv[i] ? argv[i] : "";
+            if (isClientOnlyArg(arg))
+            {
+                has_progress_arg = true;
+                break;
+            }
+        }
+        if (!has_progress_arg)
+            return;
+
+        DB::ProgressOption progress_opt = DB::ProgressOption::DEFAULT;
+        DB::ProgressOption progress_table_opt = DB::ProgressOption::DEFAULT;
+        std::string progress_value;
+        std::string progress_table_value;
+        std::optional<bool> progress_toggle;
+
+        for (int i = 0; i < argc; ++i)
+        {
+            std::string arg = argv[i] ? argv[i] : "";
+            if (arg.rfind("--progress=", 0) == 0)
+            {
+                progress_value = arg.substr(std::string("--progress=").size());
+                progress_opt = DB::toProgressOption(progress_value);
+            }
+            else if (arg.rfind("--progress-table=", 0) == 0)
+            {
+                progress_table_value = arg.substr(std::string("--progress-table=").size());
+                progress_table_opt = DB::toProgressOption(progress_table_value);
+            }
+            else if (arg.rfind("--enable-progress-table-toggle=", 0) == 0)
+            {
+                auto v = arg.substr(std::string("--enable-progress-table-toggle=").size());
+                auto lower = Poco::toLower(v);
+                progress_toggle = !(lower == "0" || lower == "false" || lower == "no" || lower == "off");
+            }
+        }
+
+        client.applyProgressOptions(progress_opt, progress_table_opt, progress_value, progress_table_value, progress_toggle);
+    }
+    catch (...)
+    {
+        /// Ignore progress configuration errors; fall back to defaults.
+    }
+}
+} // namespace
+
 chdb_connection * connect_chdb_with_exception(int argc, char ** argv)
 {
     try
     {
         DB::ThreadStatus thread_status;
-        auto server = DB::EmbeddedServer::getInstance(argc, argv);
+        auto server_argv = filterServerArgs(argc, argv);
+        auto server = DB::EmbeddedServer::getInstance(static_cast<int>(server_argv.size()), server_argv.data());
         auto client = DB::ChdbClient::create(server);
         if (!client)
         {
             throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Failed to create ChdbClient");
         }
+        applyProgressArgsIfPresent(*client, argc, argv);
 
         auto * conn = new chdb_conn();
         conn->server = client.release();

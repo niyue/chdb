@@ -112,7 +112,7 @@ g_conn_lock = threading.Lock()
 
 
 # wrap _chdb functions
-def query(sql, output_format="CSV", path="", udf_path="", params=None):
+def query(sql, output_format="CSV", path="", udf_path="", params=None, progress="none"):
     """Execute SQL query using chDB engine.
 
     This is the main query function that executes SQL statements using the embedded
@@ -194,8 +194,13 @@ def query(sql, output_format="CSV", path="", udf_path="", params=None):
     if lower_output_format in _arrow_format:
         output_format = "Arrow"
 
+    # For progress-enabled paths, use the module-level query to drive ClickHouse CLI options directly.
+    if progress and str(progress).lower() != "none" and lower_output_format != "dataframe":
+        res = _chdb.query(sql, output_format, path=path, udf_path=udf_path, params=params, progress=progress)
+        return result_func(res)
+
     with g_conn_lock:
-        conn = _chdb.connect(conn_str)
+        conn = _chdb.connect(conn_str, progress=progress)
 
         if lower_output_format == "dataframe":
             res = conn.query_df(sql, params=params)

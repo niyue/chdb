@@ -123,6 +123,22 @@ bool ChdbClient::hasStreamingQuery() const
     return streaming_query_context != nullptr;
 }
 
+void ChdbClient::applyProgressOptions(
+    ProgressOption progress_opt,
+    ProgressOption progress_table_opt,
+    const std::string & progress_value,
+    const std::string & progress_table_value,
+    std::optional<bool> progress_table_toggle)
+{
+    if (!progress_value.empty())
+        getClientConfiguration().setString("progress", progress_value);
+    if (!progress_table_value.empty())
+        getClientConfiguration().setString("progress-table", progress_table_value);
+    if (progress_table_toggle.has_value())
+        getClientConfiguration().setBool("enable-progress-table-toggle", *progress_table_toggle);
+    initTTYBuffer(progress_opt, progress_table_opt);
+}
+
 size_t ChdbClient::getStorageRowsRead() const
 {
     if (connection)
